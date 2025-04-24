@@ -4,3 +4,6 @@ Consider this a first stab and is highly useful for debugging with a canable 2.0
 I'm eager to see how this grows!
 
 GROK is responsible for most of the code.
+
+Capable of logging.
+Saves the config in a file .canconfig
