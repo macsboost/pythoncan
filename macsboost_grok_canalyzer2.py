@@ -18,7 +18,7 @@ except ImportError:
     cantools = None
 try:
     import matplotlib
-    matplotlib.use('TkAgg')  # Set Tkinter backend to prevent standalone windows
+    matplotlib.use('TkAgg')
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
@@ -53,6 +53,7 @@ class CANApp(tk.Tk):
         self.serial_adapters = ['slcan', 'usb2can']
         self.available_baudrates = ['9600', '19200', '38400', '57600', '115200', '921600']
         self.available_bitrates = ['125000', '250000', '500000', '1000000']
+        self.available_data_bitrates = ['2000000', '4000000', '8000000']
         self.highlighted_rows = {}
         self.max_messages = 500
         self.highlight_mode = 'Message Change'
@@ -66,6 +67,8 @@ class CANApp(tk.Tk):
         self.highlight_changes_var = tk.BooleanVar(value=True)
         self.can_error_count = 0
         self.send_periodic_var = tk.BooleanVar(value=False)
+        self.extended_id_var = tk.BooleanVar(value=False)
+        self.can_fd_var = tk.BooleanVar(value=False)
 
         # Load configuration
         self.load_config()
@@ -86,7 +89,10 @@ class CANApp(tk.Tk):
                 'port': default_port,
                 'channel': 'can0',
                 'bitrate': '500000',
-                'baudrate': '115200'
+                'baudrate': '115200',
+                'data_bitrate': '2000000',
+                'extended_id': 'False',
+                'can_fd': 'False'
             }
             self.cfg['Logging'] = {'log_file': 'can_log.csv'}
             self.cfg['Display'] = {
@@ -101,7 +107,10 @@ class CANApp(tk.Tk):
                     'port': default_port,
                     'channel': 'can0',
                     'bitrate': '500000',
-                    'baudrate': '115200'
+                    'baudrate': '115200',
+                    'data_bitrate': '2000000',
+                    'extended_id': 'False',
+                    'can_fd': 'False'
                 }
             if 'Logging' not in self.cfg:
                 self.cfg['Logging'] = {'log_file': 'can_log.csv'}
@@ -113,6 +122,8 @@ class CANApp(tk.Tk):
             self.save_config()
         self.time_mode = self.cfg['Display'].get('time_mode', 'Timestamp')
         self.dark_mode = self.cfg.getboolean('Display', 'dark_mode', fallback=False)
+        self.extended_id_var.set(self.cfg.getboolean('Interface', 'extended_id', fallback=False))
+        self.can_fd_var.set(self.cfg.getboolean('Interface', 'can_fd', fallback=False))
 
     def save_config(self):
         with open('.canconfig', 'w') as configfile:
@@ -141,13 +152,9 @@ class CANApp(tk.Tk):
 
     def create_gui(self):
         font_candidates = [
-            ("Courier", 11),
-            ("Menlo", 11),
-            ("Inconsolata", 11),
-            ("Courier New", 11),
-            ("DejaVu Sans Mono", 11),
-            ("Monaco", 11),
-            ("Consolas", 11)
+            ("Courier", 11), ("Menlo", 11), ("Inconsolata", 11),
+            ("Courier New", 11), ("DejaVu Sans Mono", 11),
+            ("Monaco", 11), ("Consolas", 11)
         ]
         self.mono_font = ("Courier", 11)
         selected_font = "Courier"
@@ -199,6 +206,8 @@ class CANApp(tk.Tk):
         self.filter_entry.bind("<Return>", self.apply_filter)
         ttk.Checkbutton(toolbar, text="Highlight Changes", variable=self.highlight_changes_var).pack(side="left", padx=2)
         ttk.Checkbutton(toolbar, text="Big Endian", variable=self.endian_var, command=self.update_all_display_columns).pack(side="left", padx=2)
+        ttk.Checkbutton(toolbar, text="29-bit ID", variable=self.extended_id_var, command=self.update_send_labels).pack(side="left", padx=2)
+        ttk.Checkbutton(toolbar, text="CAN FD", variable=self.can_fd_var, command=self.update_send_labels).pack(side="left", padx=2)
 
         info_frame = ttk.Frame(self)
         info_frame.pack(side="top", fill="x", padx=5, pady=2)
@@ -266,11 +275,13 @@ class CANApp(tk.Tk):
 
         send_frame = ttk.LabelFrame(right_frame, text="Send Message")
         send_frame.pack(fill="x", padx=5, pady=5)
-        ttk.Label(send_frame, text="ID (hex, 0-7FF):").grid(row=0, column=0, padx=2, pady=2)
+        self.id_label = ttk.Label(send_frame, text="ID (hex, 0-7FF):")
+        self.id_label.grid(row=0, column=0, padx=2, pady=2)
         self.id_entry = ttk.Entry(send_frame, width=10)
         self.id_entry.insert(0, "123")
         self.id_entry.grid(row=0, column=1, padx=2, pady=2)
-        ttk.Label(send_frame, text="Data (hex, 0-8 bytes):").grid(row=1, column=0, padx=2, pady=2)
+        self.data_label = ttk.Label(send_frame, text="Data (hex, 0-8 bytes):")
+        self.data_label.grid(row=1, column=0, padx=2, pady=2)
         self.data_entry = ttk.Entry(send_frame, width=20)
         self.data_entry.insert(0, "01 02 03 04")
         self.data_entry.grid(row=1, column=1, padx=2, pady=2)
@@ -289,6 +300,9 @@ class CANApp(tk.Tk):
         self.interval_entry.insert(0, "1000")
         self.interval_entry.grid(row=3, column=1, padx=2, pady=2)
 
+        # Update send labels initially
+        self.update_send_labels()
+
         self.status_bar = ttk.Label(self, text="Disconnected", relief="sunken")
         self.status_bar.pack(side="bottom", fill="x")
 
@@ -304,6 +318,12 @@ class CANApp(tk.Tk):
             self.toggle_dark_mode()
 
         self.update_status_bar()
+
+    def update_send_labels(self):
+        id_label = "ID (hex, 0-1FFFFFFF):" if self.extended_id_var.get() else "ID (hex, 0-7FF):"
+        data_label = "Data (hex, 0-64 bytes):" if self.can_fd_var.get() else "Data (hex, 0-8 bytes):"
+        self.id_label.config(text=id_label)
+        self.data_label.config(text=data_label)
 
     def update_highlight_tags(self):
         steps = 8
@@ -326,16 +346,17 @@ class CANApp(tk.Tk):
 
     def format_data_entry(self, event):
         text = self.data_entry.get().replace(' ', '').lower()
+        max_bytes = 64 if self.can_fd_var.get() else 8
         if not text:
-            formatted = '00 00 00 00 00 00 00 00'
+            formatted = ' '.join(['00'] * max_bytes)
         else:
             if not all(c in '0123456789abcdef' for c in text):
                 messagebox.showerror("Error", "Data must contain only hex digits (0-9, a-f)")
                 return
-            if len(text) > 16:
-                messagebox.showerror("Error", "Data must be at most 8 bytes (16 hex digits)")
+            if len(text) > max_bytes * 2:
+                messagebox.showerror("Error", f"Data must be at most {max_bytes} bytes ({max_bytes * 2} hex digits)")
                 return
-            text = text.ljust(16, '0')
+            text = text.ljust(max_bytes * 2, '0')
             formatted = ' '.join(text[i:i+2] for i in range(0, len(text), 2))
         self.data_entry.delete(0, tk.END)
         self.data_entry.insert(0, formatted)
@@ -343,19 +364,21 @@ class CANApp(tk.Tk):
     def validate_send_inputs(self):
         try:
             can_id = int(self.id_entry.get(), 16)
-            if can_id < 0 or can_id > 0x7FF:
-                raise ValueError("CAN ID must be between 0 and 0x7FF")
+            max_id = 0x1FFFFFFF if self.extended_id_var.get() else 0x7FF
+            if can_id < 0 or can_id > max_id:
+                raise ValueError(f"CAN ID must be between 0 and {hex(max_id)}")
             data_text = self.data_entry.get().replace(' ', '')
+            max_bytes = 64 if self.can_fd_var.get() else 8
             if not data_text:
-                data = b'\x00\x00\x00\x00\x00\x00\x00\x00'
+                data = bytes(max_bytes)
             else:
                 if not all(c in '0123456789ABCDEFabcdef' for c in data_text):
                     raise ValueError("Data must contain only hex digits")
                 if len(data_text) % 2 != 0:
                     raise ValueError("Data must have even number of hex digits")
                 data = bytes.fromhex(data_text)
-            if len(data) > 8:
-                raise ValueError("Data must be 0 to 8 bytes")
+            if len(data) > max_bytes:
+                raise ValueError(f"Data must be 0 to {max_bytes} bytes")
             interval = float(self.interval_entry.get())
             if interval <= 0:
                 raise ValueError("Interval must be positive")
@@ -426,7 +449,7 @@ class CANApp(tk.Tk):
     def open_interface_settings(self):
         settings_win = tk.Toplevel(self)
         settings_win.title("Interface Settings")
-        settings_win.geometry("400x400")
+        settings_win.geometry("400x450")
 
         ttk.Label(settings_win, text="Adapter:").pack(pady=5)
         adapter_entry = ttk.Combobox(settings_win, values=self.available_adapters, state="readonly")
@@ -449,16 +472,25 @@ class CANApp(tk.Tk):
         bitrate_entry.set(self.cfg['Interface'].get('bitrate', '500000'))
         bitrate_entry.pack(pady=5)
 
+        ttk.Label(settings_win, text="CAN FD Data Bitrate (bps):").pack(pady=5)
+        data_bitrate_entry = ttk.Combobox(settings_win, values=self.available_data_bitrates, state="readonly")
+        data_bitrate_entry.set(self.cfg['Interface'].get('data_bitrate', '2000000'))
+        data_bitrate_entry.pack(pady=5)
+
         ttk.Label(settings_win, text="Serial Baud Rate:").pack(pady=5)
         baudrate_entry = ttk.Combobox(settings_win, values=self.available_baudrates, state="readonly")
         baudrate_entry.set(self.cfg['Interface'].get('baudrate', '115200'))
         baudrate_entry.pack(pady=5)
 
+        ttk.Checkbutton(settings_win, text="Use 29-bit Extended IDs", variable=self.extended_id_var, command=self.update_send_labels).pack(pady=5)
+        ttk.Checkbutton(settings_win, text="Enable CAN FD Mode", variable=self.can_fd_var, command=self.update_send_labels).pack(pady=5)
+
         ttk.Label(settings_win, text="Interface Response:").pack(pady=5)
         self.test_result = ttk.Label(settings_win, text="Not tested")
         self.test_result.pack(pady=5)
         ttk.Button(settings_win, text="Test Interface", command=lambda: self.test_interface(
-            adapter_entry.get(), port_entry.get(), channel_entry.get(), bitrate_entry.get(), baudrate_entry.get()
+            adapter_entry.get(), port_entry.get(), channel_entry.get(), bitrate_entry.get(),
+            baudrate_entry.get(), data_bitrate_entry.get()
         )).pack(pady=5)
 
         def save_settings():
@@ -467,6 +499,9 @@ class CANApp(tk.Tk):
             self.cfg['Interface']['channel'] = channel_entry.get()
             self.cfg['Interface']['bitrate'] = bitrate_entry.get()
             self.cfg['Interface']['baudrate'] = baudrate_entry.get()
+            self.cfg['Interface']['data_bitrate'] = data_bitrate_entry.get()
+            self.cfg['Interface']['extended_id'] = str(self.extended_id_var.get())
+            self.cfg['Interface']['can_fd'] = str(self.can_fd_var.get())
             self.save_config()
             self.serial_number = self.get_serial_number(port_entry.get(), int(baudrate_entry.get()))
             self.serial_label.config(text=f"Serial: {self.serial_number}")
@@ -477,7 +512,7 @@ class CANApp(tk.Tk):
 
         ttk.Button(settings_win, text="Save", command=save_settings).pack(pady=10)
 
-    def test_interface(self, bustype, port, channel, bitrate, baudrate):
+    def test_interface(self, bustype, port, channel, bitrate, baudrate, data_bitrate):
         result = "Test failed"
         try:
             if bustype in self.serial_adapters:
@@ -496,7 +531,14 @@ class CANApp(tk.Tk):
                     self.serial_number = self.get_serial_number(port, int(baudrate))
                     self.serial_label.config(text=f"Serial: {self.serial_number}")
             else:
-                can.interface.Bus(interface=bustype, channel=channel, bitrate=int(bitrate))
+                bus_params = {
+                    'interface': bustype,
+                    'channel': channel,
+                    'bitrate': int(bitrate),
+                    'fd': self.can_fd_var.get(),
+                    'data_bitrate': int(data_bitrate) if self.can_fd_var.get() else None
+                }
+                can.interface.Bus(**{k: v for k, v in bus_params.items() if v is not None})
                 result = "Bus initialized successfully"
         except Exception as e:
             result = f"Error: {e}"
@@ -506,7 +548,8 @@ class CANApp(tk.Tk):
         filter_text = self.filter_entry.get().strip()
         try:
             if filter_text:
-                self.filter_ids = set(f"{int(id.strip(), 16):03X}" for id in filter_text.split(','))
+                max_id = 0x1FFFFFFF if self.extended_id_var.get() else 0x7FF
+                self.filter_ids = set(f"{int(id.strip(), 16):X}" for id in filter_text.split(',') if int(id.strip(), 16) <= max_id)
             else:
                 self.filter_ids.clear()
             self.update_status_bar()
@@ -615,6 +658,9 @@ class CANApp(tk.Tk):
             status += " | Paused"
         if self.filter_ids:
             status += f" | Filtering: {','.join(self.filter_ids)}"
+        mode = "CAN FD" if self.can_fd_var.get() else "CAN"
+        id_type = "29-bit" if self.extended_id_var.get() else "11-bit"
+        status += f" | Mode: {mode}, {id_type}"
         self.status_bar.config(text=status)
         self.update_info_labels()
 
@@ -625,18 +671,19 @@ class CANApp(tk.Tk):
             channel = self.cfg['Interface']['port'] if bustype in self.serial_adapters else self.cfg['Interface']['channel']
             self.interface_label.config(text=f"Interface: {bustype} on {channel}")
             bitrate = self.cfg['Interface']['bitrate']
-            self.stats_label.config(text=f"Baud: {bitrate} | Msg/s: {self.message_rate:.1f} | Bus Load: {self.bus_load:.1f}%")
+            data_bitrate = self.cfg['Interface'].get('data_bitrate', 'N/A') if self.can_fd_var.get() else 'N/A'
+            self.stats_label.config(text=f"Baud: {bitrate} | Data: {data_bitrate} | Msg/s: {self.message_rate:.1f} | Bus Load: {self.bus_load:.1f}%")
         else:
             self.connection_indicator.itemconfig('indicator', fill='red')
             self.interface_label.config(text="Interface: Disconnected")
-            self.stats_label.config(text="Baud: N/A | Msg/s: 0.0 | Bus Load: 0.0%")
+            self.stats_label.config(text="Baud: N/A | Data: N/A | Msg/s: 0.0 | Bus Load: 0.0%")
         self.serial_label.config(text=f"Serial: {self.serial_number}")
 
     def log_message(self, msg, direction, delta, timestamp):
         if not self.log_writer:
             return
         try:
-            can_id = f"{msg.arbitration_id:03X}"
+            can_id = f"{msg.arbitration_id:X}"
             time_value = timestamp if self.time_mode == 'Timestamp' else f"{delta:06.3f}"
             data = ' '.join(f'{b:02X}' for b in msg.data)
             decoded = ""
@@ -647,13 +694,13 @@ class CANApp(tk.Tk):
                     decoded = ', '.join(f"{k}: {v}" for k, v in decoded_dict.items())
                 except:
                     decoded = "DBC decode error"
-            self.log_writer.writerow([time_value, can_id, data, decoded, direction])
+            self.log_writer.writerow([time_value, can_id, data, decoded, direction, msg.is_extended_id, msg.is_fd])
             self.log_file.flush()
         except Exception:
             pass
 
     def display_message(self, msg, direction="RX"):
-        can_id = f"{msg.arbitration_id:03X}"
+        can_id = f"{msg.arbitration_id:X}"
         if self.paused or (direction == "RX" and self.filter_ids and can_id not in self.filter_ids):
             return
 
@@ -781,17 +828,20 @@ class CANApp(tk.Tk):
             bustype = interface['bustype']
             channel = interface['port'] if bustype in self.serial_adapters else interface.get('channel', 'can0')
             bitrate = int(interface['bitrate'])
+            data_bitrate = int(interface.get('data_bitrate', '2000000')) if self.can_fd_var.get() else None
             bus_params = {
                 'interface': bustype,
                 'channel': channel,
-                'bitrate': bitrate
+                'bitrate': bitrate,
+                'fd': self.can_fd_var.get(),
+                'data_bitrate': data_bitrate
             }
             if bustype in self.serial_adapters:
                 baudrate = int(interface.get('baudrate', '115200'))
                 bus_params['serial_port_baudrate'] = baudrate
                 self.serial_number = self.get_serial_number(channel, baudrate)
                 self.serial_label.config(text=f"Serial: {self.serial_number}")
-            self.bus = can.interface.Bus(**bus_params)
+            self.bus = can.interface.Bus(**{k: v for k, v in bus_params.items() if v is not None})
             self.running = True
             self.last_message_timestamp = None
             self.message_count = 0
@@ -883,7 +933,7 @@ class CANApp(tk.Tk):
         if elapsed > 0:
             self.message_rate = self.message_count / elapsed
             bitrate = int(self.cfg['Interface'].get('bitrate', 500000))
-            bits_per_message = 47 + 64
+            bits_per_message = (128 + 64) if self.can_fd_var.get() else (47 + 64)
             self.bus_load = (self.message_rate * bits_per_message / bitrate) * 100
             if self.bus_load > 100:
                 self.bus_load = 100
@@ -913,10 +963,17 @@ class CANApp(tk.Tk):
             return
         can_id, data, _ = inputs
         try:
-            msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=False)
+            msg = can.Message(
+                arbitration_id=can_id,
+                data=data,
+                is_extended_id=self.extended_id_var.get(),
+                is_fd=self.can_fd_var.get(),
+                bitrate_switch=self.can_fd_var.get()
+            )
             msg.timestamp = time.time()
             self.bus.send(msg)
             self.display_message(msg, direction="TX")
+            messagebox.showinfo("Success", f"Message sent: ID={hex(can_id)}, Data={' '.join(f'{b:02X}' for b in data)}")
         except can.CanError as e:
             messagebox.showerror("Error", f"CAN error sending message: {e}")
         except Exception as e:
@@ -956,7 +1013,13 @@ class CANApp(tk.Tk):
             self.stop_periodic()
             return
         try:
-            msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=False)
+            msg = can.Message(
+                arbitration_id=can_id,
+                data=data,
+                is_extended_id=self.extended_id_var.get(),
+                is_fd=self.can_fd_var.get(),
+                bitrate_switch=self.can_fd_var.get()
+            )
             msg.timestamp = time.time()
             self.bus.send(msg)
             self.display_message(msg, direction="TX")
@@ -979,6 +1042,43 @@ class CANApp(tk.Tk):
         self.send_periodic_check.update()
         self.update_idletasks()
 
+    def resend_selected(self):
+        if not self.bus:
+            messagebox.showerror("Error", "CAN bus not connected")
+            return
+        selected = self.message_tree.selection()
+        if not selected:
+            messagebox.showerror("Error", "Select a message to resend")
+            return
+        item = self.message_tree.item(selected[0])
+        can_id = int(item['values'][1], 16)
+        data_str = item['values'][2]
+        try:
+            data = bytes.fromhex(data_str.replace(' ', ''))
+            max_bytes = 64 if self.can_fd_var.get() else 8
+            if len(data) > max_bytes:
+                messagebox.showerror("Error", f"Data length exceeds {max_bytes} bytes for current mode")
+                return
+            max_id = 0x1FFFFFFF if self.extended_id_var.get() else 0x7FF
+            if can_id > max_id:
+                messagebox.showerror("Error", f"CAN ID {hex(can_id)} exceeds {hex(max_id)} for current mode")
+                return
+            msg = can.Message(
+                arbitration_id=can_id,
+                data=data,
+                is_extended_id=self.extended_id_var.get(),
+                is_fd=self.can_fd_var.get(),
+                bitrate_switch=self.can_fd_var.get()
+            )
+            msg.timestamp = time.time()
+            self.bus.send(msg)
+            self.display_message(msg, direction="TX")
+            messagebox.showinfo("Success", f"Message resent: ID={hex(can_id)}, Data={' '.join(f'{b:02X}' for b in data)}")
+        except can.CanError as e:
+            messagebox.showerror("Error", f"CAN error resending message: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to resend: {e}")
+
     def start_logging(self):
         if self.log_file:
             messagebox.showinfo("Info", "Logging already active")
@@ -987,7 +1087,7 @@ class CANApp(tk.Tk):
         try:
             self.log_file = open(log_file, 'w', newline='')
             self.log_writer = csv.writer(self.log_file)
-            self.log_writer.writerow(["Time", "ID", "Data", "Display", "Direction"])
+            self.log_writer.writerow(["Time", "ID", "Data", "Display", "Direction", "Extended", "FD"])
             messagebox.showinfo("Info", f"Logging started to {log_file}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start logging: {e}")
@@ -1073,7 +1173,6 @@ class CANApp(tk.Tk):
             def do_plot_signals(selected_signals, window):
                 if not selected_signals:
                     return
-                # Create a matplotlib figure explicitly for Tkinter
                 fig = Figure()
                 ax = fig.add_subplot(111)
                 lines = []
@@ -1086,7 +1185,6 @@ class CANApp(tk.Tk):
                 ax.legend()
                 ax.set_title(f"Signals for CAN ID {can_id}")
 
-                # Embed in Tkinter window
                 plot_window = tk.Toplevel(self)
                 plot_window.title(f"Signal Plot for CAN ID {can_id}")
                 canvas = FigureCanvasTkAgg(fig, master=plot_window)
@@ -1147,26 +1245,6 @@ class CANApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to plot: {e}")
 
-    def resend_selected(self):
-        if not self.bus:
-            messagebox.showerror("Error", "CAN bus not connected")
-            return
-        selected = self.message_tree.selection()
-        if not selected:
-            messagebox.showerror("Error", "Select a message to resend")
-            return
-        item = self.message_tree.item(selected[0])
-        can_id = int(item['values'][1], 16)
-        data_str = item['values'][2]
-        data = bytes.fromhex(data_str.replace(' ', ''))
-        try:
-            msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=False)
-            msg.timestamp = time.time()
-            self.bus.send(msg)
-            self.display_message(msg, direction="TX")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to resend: {e}")
-
     def analyze_bytes(self):
         selected = self.message_tree.selection()
         if not selected:
@@ -1186,7 +1264,8 @@ class CANApp(tk.Tk):
         time_entry.pack(pady=5)
 
         byte_labels = {}
-        for i in range(8):
+        max_bytes = 64 if self.can_fd_var.get() else 8
+        for i in range(max_bytes):
             label = ttk.Label(analysis_win, text=f"Byte {i}: No data")
             label.pack(pady=2)
             byte_labels[i] = label
@@ -1269,7 +1348,7 @@ class CANApp(tk.Tk):
                 if window <= 0:
                     return
                 latest_time = max((t for t, _ in self.message_history[can_id]), default=time.time())
-                for i in range(8):
+                for i in range(max_bytes):
                     values = []
                     for timestamp, data in self.message_history[can_id]:
                         if i < len(data) and latest_time - timestamp <= window:
